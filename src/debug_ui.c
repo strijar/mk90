@@ -98,6 +98,7 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, int x, int y, int w,
 static lv_obj_t *entry(lv_obj_t *parent, const char *text, int x, int y, int width) {
     lv_obj_t *o = lv_textarea_create(parent);
 
+    lv_obj_set_scrollable(o, false);
     lv_textarea_set_one_line(o, true);
     lv_obj_set_pos(o, x, y);
     lv_obj_set_size(o, width, 34);
