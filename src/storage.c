@@ -1,11 +1,13 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "mk90.h"
+#include "debugger.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static bool path_join(char *path, size_t size, const char *dir, const char *name) {
     int n = snprintf(path, size, "%s/%s", dir, name);
@@ -22,6 +24,110 @@ static bool failure(char *error, size_t size, const char *path) {
     snprintf(error, size, "%s: %s", path, strerror(errno));
 
     return false;
+}
+
+bool mk90_smp_import(mk90 *m, unsigned slot, const char *path, char *error, size_t size) {
+    if (slot >= 2 || !path || !*path) {
+        errno = EINVAL;
+        return failure(error, size, "SMP");
+    }
+
+    FILE *f = fopen(path, "rb");
+
+    if (!f)
+        return failure(error, size, path);
+
+    struct stat st;
+
+    if (fstat(fileno(f), &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || st.st_size > 0x1000000) {
+        fclose(f);
+        errno = EINVAL;
+        return failure(error, size, path);
+    }
+
+    size_t   length = (size_t) st.st_size;
+    uint8_t *data = malloc(length);
+
+    if (!data) {
+        fclose(f);
+        return failure(error, size, path);
+    }
+
+    bool ok = fread(data, 1, length, f) == length && fgetc(f) == EOF && !ferror(f);
+
+    if (fclose(f))
+        ok = false;
+
+    if (!ok) {
+        free(data);
+        errno = EIO;
+        return failure(error, size, path);
+    }
+
+    free(m->smp[slot].data);
+
+    m->smp[slot] = (mk90_smp) { .data = data, .size = length, .mask = length < 0x10000 ? 0xffff : 0xffffff, .dirty = true };
+    /* A newly inserted card starts a fresh serial transaction. */
+
+    if ((m->io[2] & 7) == slot) {
+        m->selected = false;
+        m->shift = 0xffff;
+    }
+
+    return true;
+}
+
+bool mk90_smp_export(const mk90 *m, unsigned slot, const char *path, bool overwrite, char *error, size_t size) {
+    if (slot >= 2 || !path || !*path || !m->smp[slot].data) {
+        errno = EINVAL;
+        return failure(error, size, "SMP");
+    }
+
+    char temp[4096];
+
+    int  n = snprintf(temp, sizeof(temp), "%s.XXXXXX", path);
+
+    if (n < 0 || (size_t) n >= sizeof(temp)) {
+        errno = ENAMETOOLONG;
+        return failure(error, size, path);
+    }
+
+    int fd = mkstemp(temp);
+
+    if (fd < 0)
+        return failure(error, size, path);
+
+    FILE *f = fdopen(fd, "wb");
+
+    if (!f) {
+        int saved = errno;
+        close(fd);
+        unlink(temp);
+        errno = saved;
+        return failure(error, size, path);
+    }
+
+    bool ok = fwrite(m->smp[slot].data, 1, m->smp[slot].size, f) == m->smp[slot].size;
+
+    if (fflush(f) || fsync(fd))
+        ok = false;
+
+    if (fclose(f))
+        ok = false;
+
+    if (ok)
+        ok = (overwrite ? rename(temp, path) : link(temp, path)) == 0;
+
+    int saved = errno;
+
+    unlink(temp);
+
+    if (!ok) {
+        errno = saved ? saved : EIO;
+        return failure(error, size, path);
+    }
+
+    return true;
 }
 
 static bool load_rom(uint8_t *data, size_t capacity, const char *path, bool optional, char *error, size_t size) {

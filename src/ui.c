@@ -3,6 +3,7 @@
 #include "ui.h"
 #include "artwork.h"
 #include "x11_host.h"
+#include "debug_ui.h"
 #include <X11/keysym.h>
 #include <ctype.h>
 #include <signal.h>
@@ -15,7 +16,8 @@ static struct {
     lv_obj_t      *root, *lcd, *overlay[8], *down[63];
     uint8_t        lcd_pixels[120 * 64 * 4], mono[120 * 64];
     lv_image_dsc_t lcd_image;
-    bool           running, overlay_visible, paused;
+    bool           running, overlay_visible;
+    mk90_debugger  debug;
     unsigned       mouse_key, host_key;
 } ui;
 
@@ -45,12 +47,18 @@ static void refresh_keys(void) {
 }
 
 static void reset(void) {
-    time_t    now = time(NULL);
+    time_t now = time(NULL);
 
     struct tm date;
 
     if (localtime_r(&now, &date))
         mk90_reset(ui.machine, &date);
+
+    /* Keep user breakpoints and the pause state, cancel pending run commands. */
+    bool paused = ui.debug.paused;
+    mk90_debug_pause(ui.machine, &ui.debug);
+    if (!paused)
+        mk90_debug_continue(ui.machine, &ui.debug);
 
     ui.mouse_key = ui.host_key = 0;
     refresh_keys();
@@ -65,7 +73,7 @@ static void toggle_overlay(void) {
 }
 
 static void mouse_event(lv_event_t *e) {
-    unsigned        key = (unsigned) (uintptr_t) lv_event_get_user_data(e);
+    unsigned key = (unsigned) (uintptr_t) lv_event_get_user_data(e);
 
     lv_event_code_t code = lv_event_get_code(e);
 
@@ -161,8 +169,16 @@ static void host_key(unsigned long symbol, bool down) {
             return;
         }
 
+        if (symbol == XK_F3) {
+            mk90_debug_ui_open();
+            return;
+        }
+
         if (symbol == XK_Pause) {
-            ui.paused = !ui.paused;
+            if (ui.debug.paused)
+                mk90_debug_continue(ui.machine, &ui.debug);
+            else
+                mk90_debug_pause(ui.machine, &ui.debug);
             return;
         }
     }
@@ -318,7 +334,7 @@ static void discard_flush(lv_display_t *d, const lv_area_t *area, uint8_t *pixel
     lv_display_flush_ready(d);
 }
 
-int mk90_ui(mk90 *m, unsigned seconds, bool smoke, const char *screenshot) {
+int mk90_ui(mk90 *m, unsigned seconds, bool smoke, const char *screenshot, bool debugger, const char *debug_screenshot) {
     memset(&ui, 0, sizeof(ui));
 
     ui.machine = m;
@@ -330,7 +346,7 @@ int mk90_ui(mk90 *m, unsigned seconds, bool smoke, const char *screenshot) {
 
     lv_init();
     lv_tick_set_cb(tick);
-    lv_display_t  *display;
+    lv_display_t *display;
 
     static uint8_t offscreen[790 * 32 * 4];
 
@@ -350,11 +366,16 @@ int mk90_ui(mk90 *m, unsigned seconds, bool smoke, const char *screenshot) {
     }
 
     create_ui(display);
+    mk90_debug_init(&ui.debug);
+    mk90_debug_ui_init(m, &ui.debug, display, smoke);
+    if (debugger)
+        mk90_debug_ui_open();
     uint64_t start = microseconds(), last = start, last_frame = 0, simulated = 0;
 
     while (ui.running && !interrupted) {
         if (!smoke && !mk90_x11_poll())
             break;
+        mk90_debug_ui_poll();
 
         uint64_t now = microseconds();
         unsigned elapsed = smoke ? 1000 : (unsigned) (now - last);
@@ -366,8 +387,12 @@ int mk90_ui(mk90 *m, unsigned seconds, bool smoke, const char *screenshot) {
 
         last = now;
 
-        if (!ui.paused)
-            mk90_run_us(m, elapsed);
+        bool was_paused = ui.debug.paused;
+        mk90_debug_run_us(m, &ui.debug, elapsed);
+        if (!was_paused && ui.debug.paused &&
+            (ui.debug.reason == MK90_DEBUG_BREAKPOINT || ui.debug.reason == MK90_DEBUG_CURSOR) && !mk90_debug_ui_visible())
+            mk90_debug_ui_open();
+        mk90_debug_ui_update();
 
         simulated += elapsed;
 
@@ -397,6 +422,16 @@ int mk90_ui(mk90 *m, unsigned seconds, bool smoke, const char *screenshot) {
     }
 
     ui.running = false;
+
+    if (debug_screenshot) {
+        if (!mk90_debug_ui_visible())
+            mk90_debug_ui_open();
+        if (!mk90_debug_ui_snapshot(debug_screenshot)) {
+            fprintf(stderr, "Cannot save debugger screenshot: %s\n", debug_screenshot);
+            result = 1;
+        }
+    }
+    mk90_debug_ui_close();
 
     if (smoke)
         lv_display_delete(display);

@@ -22,6 +22,8 @@ static void usage(const char *program) {
            "  --lcd FILE        Save LCD as a binary PBM on exit\n"
            "  --ui-smoke        Render LVGL offscreen without an X server\n"
            "  --screenshot FILE Save full LVGL interface as PPM on exit\n"
+           "  --debugger        Open debugger and pause at startup\n"
+           "  --debug-screenshot FILE Save debugger as PPM on exit\n"
            "  --help            Show this help\n",
            program);
 }
@@ -42,6 +44,8 @@ static bool number(const char *s, unsigned min, unsigned max, unsigned *result) 
 int main(int argc, char **argv) {
     const char *assets = MK90_ASSET_DIR, *state = MK90_STATE_DIR;
     const char *lcd = NULL, *screenshot = NULL;
+    const char *debug_screenshot = NULL;
+    bool        debugger = false;
     unsigned    ram = 16, speed = 100000, seconds = 0;
     bool        headless = false, smoke = false, no_save = false;
 
@@ -67,6 +71,10 @@ int main(int argc, char **argv) {
             no_save = true;
             continue;
         }
+        if (!strcmp(arg, "--debugger")) {
+            debugger = true;
+            continue;
+        }
 
         if (i + 1 >= argc) {
             fprintf(stderr, "Missing value: %s\n", arg);
@@ -84,6 +92,8 @@ int main(int argc, char **argv) {
             lcd = value;
         else if (!strcmp(arg, "--screenshot"))
             screenshot = value;
+        else if (!strcmp(arg, "--debug-screenshot"))
+            debug_screenshot = value;
         else if (!strcmp(arg, "--ram"))
             ok = number(value, 16, 32, &ram);
         else if (!strcmp(arg, "--speed"))
@@ -99,7 +109,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (headless && (smoke || screenshot)) {
+    if (headless && (smoke || screenshot || debugger || debug_screenshot)) {
         fprintf(stderr, "Use --ui-smoke for GUI screenshots, --headless --lcd for LCD dumps.\n");
         return 2;
     }
@@ -145,7 +155,7 @@ int main(int argc, char **argv) {
         printf("PC=%04x PSW=%04x LCD=%04x instructions=%llu\n", m->r[7], m->psw, m->lcd[0], (unsigned long long) m->instructions);
     } else {
 #ifdef MK90_GUI
-        result = mk90_ui(m, seconds, smoke, screenshot);
+        result = mk90_ui(m, seconds, smoke, screenshot, debugger, debug_screenshot);
 #else
         (void) smoke;
         fprintf(stderr, "Built without GUI; run with --headless or configure MK90_GUI=ON.\n");

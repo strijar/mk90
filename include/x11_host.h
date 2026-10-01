@@ -4,6 +4,12 @@
 #include <lvgl.h>
 
 typedef void (*mk90_host_key_cb)(unsigned long symbol, bool down);
+typedef struct mk90_x11_window mk90_x11_window;
+
+mk90_x11_window *mk90_x11_create(const char *title, unsigned width, unsigned height, mk90_host_key_cb callback, bool repeat);
+lv_display_t    *mk90_x11_display(mk90_x11_window *window);
+bool             mk90_x11_poll_window(mk90_x11_window *window);
+void             mk90_x11_destroy(mk90_x11_window *window);
 
 lv_display_t *mk90_x11_open(mk90_host_key_cb callback);
 bool          mk90_x11_poll(void);

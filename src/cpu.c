@@ -193,9 +193,9 @@ static uint16_t execute(mk90 *m, bool *rtt) {
     /* Conditional branches. */
     unsigned branch = c >> 8;
 
-    bool     n = (m->psw & MK90_N) != 0, z = (m->psw & MK90_Z) != 0;
-    bool     v = (m->psw & MK90_V) != 0, carry = (m->psw & MK90_C) != 0;
-    bool     take;
+    bool n = (m->psw & MK90_N) != 0, z = (m->psw & MK90_Z) != 0;
+    bool v = (m->psw & MK90_V) != 0, carry = (m->psw & MK90_C) != 0;
+    bool take;
 
     switch (branch) {
         case 1:

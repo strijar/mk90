@@ -3,6 +3,6 @@
 
 #include "mk90.h"
 
-int mk90_ui(mk90 *m, unsigned seconds, bool smoke, const char *screenshot);
+int mk90_ui(mk90 *m, unsigned seconds, bool smoke, const char *screenshot, bool debugger, const char *debug_screenshot);
 
 #endif

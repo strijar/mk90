@@ -2,6 +2,7 @@
  * Ported from emul_src/{def,syscon,iosystem,smp,rtc,lcd,keyboard}.pas.
  */
 #include "mk90.h"
+#include "debugger.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -15,7 +16,7 @@ enum { P_NONE,
 static const uint16_t split[8] = { 0xe000, 0x4000, 0x8000, 0x2000, 0, 0, 0, 0 };
 static const unsigned periods[16] = { 0, 3906, 7812, 122, 244, 488, 977, 1953, 3906, 7812, 15625, 31250, 62500, 125000, 250000, 500000 };
 
-static const uint8_t  keytab[64] = {
+static const uint8_t keytab[64] = {
     0,
     0,
     0,
@@ -223,6 +224,76 @@ static void rtc_commit(mk90 *m) {
 
 static bool io_area(uint16_t a) {
     return a >= 0xe800 && a < 0xec00;
+}
+
+bool mk90_peek(const mk90 *m, uint16_t a, bool byte, mk90_memory_view view, uint16_t *value) {
+    *value = byte ? 255 : 65535;
+
+    bool ram = view == MK90_VIEW_RAM;
+    bool rom = view == MK90_VIEW_ROM;
+
+    if (view == MK90_VIEW_CPU) {
+        ram = a < split[(m->sys1 >> 11) & 3] || io_area(a);
+        rom = !ram && !(m->sys2 & 0x2000) &&
+              ((a >= split[(m->sys1 >> 11) & 7] && a < 0xe000) ||
+               ((m->sys2 & 0x200) && a >= 0xe000 && a < 0xe800) ||
+               (a >= 0xec00 && a < 0xfe00));
+    }
+
+    if (ram && a < m->ram_size) {
+        if (!byte && a + 1u >= m->ram_size)
+            return false;
+
+        *value = m->ram[a] | (byte ? 0 : (uint16_t) m->ram[a + 1] << 8);
+        return true;
+    }
+
+    if (rom && a >= 0x4000 && (unsigned) (a - 0x4000) + (byte ? 0 : 1) < MK90_ROM_SIZE) {
+        *value = m->rom[a - 0x4000] | (byte ? 0 : (uint16_t) m->rom[a - 0x4000 + 1] << 8);
+        return true;
+    }
+
+    if (view != MK90_VIEW_CPU || !ram)
+        return false;
+
+    uint16_t result;
+
+    if ((a & 0xfff8) == 0xe810) {
+        switch ((a >> 1) & 3) {
+            case 0:
+            case 3:
+                result = m->shift;
+                break;
+
+            case 1:
+                result = m->requests;
+                break;
+
+            default:
+                result = (m->io[2] & 0x70) | 0xff84 | (m->selected ? 0 : 8);
+                break;
+        }
+    } else if (a == 0xe81a)
+        result = m->sys1;
+    else if (a == 0xe81c)
+        result = m->sys2;
+    else if (a == 0xe818 || a == 0xe81e)
+        result = 0xffff;
+    else if ((a & 0xff00) == 0xea00) {
+        unsigned index = (a >> 1) & 63;
+
+        /* Show the value a read would see, without committing the pending write. */
+        uint8_t data = m->rtc[index];
+
+        if (m->rtc_index == (int) index && index != 12 && index != 13)
+            data = m->rtc_word >> 1;
+
+        result = (uint16_t) data << 1;
+    } else
+        return false;
+
+    *value = byte ? result & 255 : result;
+    return true;
 }
 
 uint16_t mk90_read(mk90 *m, uint16_t a, bool byte) {

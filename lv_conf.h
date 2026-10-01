@@ -8,6 +8,7 @@
 #define LV_USE_STDLIB_SPRINTF         LV_STDLIB_CLIB
 #define LV_USE_DRAW_SW                1
 #define LV_USE_SNAPSHOT               1
+#define LV_FONT_UNSCII_8              1
 #define LV_CACHE_DEF_SIZE             0
 #define LV_IMAGE_HEADER_CACHE_DEF_CNT 0
 #define LV_USE_X11                    1

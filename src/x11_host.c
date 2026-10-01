@@ -13,10 +13,11 @@
 #include <X11/Xatom.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 
-static struct {
+struct mk90_x11_window {
     lv_display_t    *display;
     lv_indev_t      *pointer;
     Display         *connection;
@@ -26,17 +27,19 @@ static struct {
     bool             pressed, closing;
     mk90_host_key_cb key;
     unsigned long    held[256];
-} host;
+    bool             repeat;
+};
+static mk90_x11_window *main_window;
 
 static void read_pointer(lv_indev_t *indev, lv_indev_data_t *data) {
-    (void) indev;
-    data->point = host.position;
-    data->state = host.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    mk90_x11_window *h = lv_indev_get_user_data(indev);
+    data->point = h->position;
+    data->state = h->pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
 static void deleted(lv_event_t *e) {
-    (void) e;
-    host.display = NULL;
+    mk90_x11_window *h = lv_event_get_user_data(e);
+    h->display = NULL;
 }
 
 static int mapped(Display *d, XEvent *e, XPointer p) {
@@ -54,8 +57,11 @@ static int input(Display *d, XEvent *e, XPointer p) {
            e->type == FocusIn || e->type == ClientMessage;
 }
 
-lv_display_t *mk90_x11_open(mk90_host_key_cb callback) {
-    memset(&host, 0, sizeof(host));
+mk90_x11_window *mk90_x11_create(const char *title, unsigned width, unsigned height, mk90_host_key_cb callback, bool repeat) {
+    mk90_x11_window *h = calloc(1, sizeof(*h));
+    if (!h)
+        return NULL;
+    h->repeat = repeat;
 
     /* LVGL's driver assumes XOpenDisplay succeeds. Fail cleanly beforehand. */
 
@@ -63,72 +69,76 @@ lv_display_t *mk90_x11_open(mk90_host_key_cb callback) {
 
     if (!probe) {
         fprintf(stderr, "Cannot open X11 display; check DISPLAY or use --headless.\n");
+        free(h);
         return NULL;
     }
 
     XCloseDisplay(probe);
-    host.key = callback;
-    host.display = lv_x11_window_create("MK-90", 790, 312);
+    h->key = callback;
+    h->display = lv_x11_window_create(title, width, height);
 
-    if (!host.display)
+    if (!h->display) {
+        free(h);
         return NULL;
+    }
 
-    _x11_user_hdr_t *header = lv_display_get_driver_data(host.display);
-    host.connection = header->display;
+    _x11_user_hdr_t *header = lv_display_get_driver_data(h->display);
+    h->connection = header->display;
 
     XEvent event;
 
-    XIfEvent(host.connection, &event, mapped, NULL);
-    host.window = event.xmap.window;
+    XIfEvent(h->connection, &event, mapped, NULL);
+    h->window = event.xmap.window;
 
     unsigned long pid = (unsigned long) getpid();
 
-    XChangeProperty(host.connection, host.window, XInternAtom(host.connection, "_NET_WM_PID", False), XA_CARDINAL, 32, PropModeReplace, (unsigned char *) &pid, 1);
-    XPutBackEvent(host.connection, &event);
-    XSelectInput(host.connection, host.window, PointerMotionMask | ButtonPressMask | ButtonReleaseMask | KeyPressMask | KeyReleaseMask | ExposureMask | StructureNotifyMask | FocusChangeMask);
-    XUndefineCursor(host.connection, host.window);
+    XChangeProperty(h->connection, h->window, XInternAtom(h->connection, "_NET_WM_PID", False), XA_CARDINAL, 32, PropModeReplace, (unsigned char *) &pid, 1);
+    XPutBackEvent(h->connection, &event);
+    XSelectInput(h->connection, h->window, PointerMotionMask | ButtonPressMask | ButtonReleaseMask | KeyPressMask | KeyReleaseMask | ExposureMask | StructureNotifyMask | FocusChangeMask);
+    XUndefineCursor(h->connection, h->window);
 
     Bool supported;
 
-    XkbSetDetectableAutoRepeat(host.connection, True, &supported);
-    host.delete_atom = XInternAtom(host.connection, "WM_DELETE_WINDOW", False);
-    host.pointer = lv_indev_create();
+    XkbSetDetectableAutoRepeat(h->connection, True, &supported);
+    h->delete_atom = XInternAtom(h->connection, "WM_DELETE_WINDOW", False);
+    h->pointer = lv_indev_create();
 
-    lv_indev_set_type(host.pointer, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_display(host.pointer, host.display);
-    lv_indev_set_read_cb(host.pointer, read_pointer);
-    lv_display_add_event_cb(host.display, deleted, LV_EVENT_DELETE, NULL);
+    lv_indev_set_type(h->pointer, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_user_data(h->pointer, h);
+    lv_indev_set_display(h->pointer, h->display);
+    lv_indev_set_read_cb(h->pointer, read_pointer);
+    lv_display_add_event_cb(h->display, deleted, LV_EVENT_DELETE, h);
 
-    return host.display;
+    return h;
 }
 
-bool mk90_x11_poll(void) {
-    if (!host.display || host.closing)
+bool mk90_x11_poll_window(mk90_x11_window *h) {
+    if (!h || !h->display || h->closing)
         return false;
 
     XEvent event;
 
-    while (XCheckIfEvent(host.connection, &event, input, NULL)) {
+    while (XCheckIfEvent(h->connection, &event, input, NULL)) {
         switch (event.type) {
             case KeyPress: {
                 unsigned code = event.xkey.keycode & 255;
-                if (!host.held[code]) {
+                if (!h->held[code] || h->repeat) {
                     KeySym symbol;
                     char   text[16];
 
                     XLookupString(&event.xkey, text, sizeof(text), &symbol, NULL);
-                    host.held[code] = symbol;
-                    host.key(symbol, true);
+                    h->held[code] = symbol;
+                    h->key(symbol, true);
                 }
                 break;
             }
 
             case KeyRelease: {
                 /* Fallback for servers without detectable autorepeat. */
-                if (XPending(host.connection)) {
+                if (XPending(h->connection)) {
                     XEvent next;
 
-                    XPeekEvent(host.connection, &next);
+                    XPeekEvent(h->connection, &next);
 
                     if (next.type == KeyPress && next.xkey.keycode == event.xkey.keycode &&
                         next.xkey.time == event.xkey.time)
@@ -137,69 +147,89 @@ bool mk90_x11_poll(void) {
 
                 unsigned code = event.xkey.keycode & 255;
 
-                if (host.held[code])
-                    host.key(host.held[code], false);
+                if (h->held[code])
+                    h->key(h->held[code], false);
 
-                host.held[code] = 0;
+                h->held[code] = 0;
                 break;
             }
 
             case MotionNotify:
-                host.position = (lv_point_t) { event.xmotion.x, event.xmotion.y };
+                h->position = (lv_point_t) { event.xmotion.x, event.xmotion.y };
                 break;
 
             case ButtonPress:
             case ButtonRelease:
-                host.position = (lv_point_t) { event.xbutton.x, event.xbutton.y };
+                h->position = (lv_point_t) { event.xbutton.x, event.xbutton.y };
 
                 if (event.xbutton.button == Button1) {
-                    host.pressed = event.type == ButtonPress;
-                    lv_indev_read(host.pointer);
+                    h->pressed = event.type == ButtonPress;
+                    lv_indev_read(h->pointer);
                 }
                 break;
 
             case FocusOut:
                 for (unsigned i = 0; i < 256; i++)
-                    if (host.held[i]) {
-                        host.key(host.held[i], false);
-                        host.held[i] = 0;
+                    if (h->held[i]) {
+                        h->key(h->held[i], false);
+                        h->held[i] = 0;
                     }
 
-                host.pressed = false;
-                lv_indev_read(host.pointer);
+                h->pressed = false;
+                lv_indev_read(h->pointer);
                 break;
 
             case ClientMessage:
-                if (event.xclient.data.l[0] == (long) host.delete_atom)
-                    host.closing = true;
+                if (event.xclient.data.l[0] == (long) h->delete_atom)
+                    h->closing = true;
                 break;
         }
     }
-    return !host.closing;
+    return !h->closing;
 }
 
-void mk90_x11_close(void) {
-    if (!host.display)
+void mk90_x11_destroy(mk90_x11_window *h) {
+    if (!h)
         return;
+    if (!h->display) {
+        free(h);
+        return;
+    }
 
-    lv_indev_delete(host.pointer);
+    lv_indev_delete(h->pointer);
 
     /* Let the driver stop and join its tick thread before freeing the display. */
 
     XEvent event = { 0 };
 
     event.xclient.type = ClientMessage;
-    event.xclient.window = host.window;
-    event.xclient.message_type = XInternAtom(host.connection, "WM_PROTOCOLS", False);
+    event.xclient.window = h->window;
+    event.xclient.message_type = XInternAtom(h->connection, "WM_PROTOCOLS", False);
     event.xclient.format = 32;
-    event.xclient.data.l[0] = (long) host.delete_atom;
+    event.xclient.data.l[0] = (long) h->delete_atom;
 
-    XSendEvent(host.connection, host.window, False, NoEventMask, &event);
-    XFlush(host.connection);
+    XSendEvent(h->connection, h->window, False, NoEventMask, &event);
+    XFlush(h->connection);
 
-    while (host.display) {
+    while (h->display) {
         lv_timer_handler();
         struct timespec delay = { 0, 1000000 };
         nanosleep(&delay, NULL);
     }
+    free(h);
+}
+
+lv_display_t *mk90_x11_display(mk90_x11_window *h) {
+    return h ? h->display : NULL;
+}
+lv_display_t *mk90_x11_open(mk90_host_key_cb callback) {
+    main_window = mk90_x11_create("MK-90", 790, 312, callback, false);
+    return mk90_x11_display(main_window);
+}
+bool mk90_x11_poll(void) {
+    return mk90_x11_poll_window(main_window);
+}
+void mk90_x11_close(void) {
+    mk90_x11_destroy(main_window);
+    main_window = NULL;
 }
